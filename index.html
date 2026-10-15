@@ -71,7 +71,7 @@ function screenDocContent(docId, text, extra) {
     const inventor = /(opfinder|inventor)/i.test(text || "");
     if (!inventor) findings.push("g2");
     else if (!/(erklær|decl|ret til opfindelsen|acquired the right)/i.test(text || "")) findings.push("p2");
-    if (extra.harPrioritet && !/(prioritetsdokument|priority document|das/i.test(text || "")) ) findings.push("p8");
+    if (extra.harPrioritet && !/(prioritetsdokument|priority document|das)/i.test(text || "")) findings.push("p8");
   }
   if (docId === "beskrivelse") {
     if (!text || text.length < 50) findings.push("g3");
@@ -277,7 +277,7 @@ function App() {
             <div className="rounded-lg bg-[#122b4a] p-5 text-white">
               <p className="text-xs uppercase tracking-wider text-white/60">Patent- og Varemærkestyrelsen · E-filing · Patentansøgning</p>
               <h2 className="mt-1 text-xl font-semibold">Ny indlevering — upload og screening</h2>
-              <p className="mt-1 text-xs text-white/60">PDF'erne læses i browseren; tegstindholdet tjekkes mod PA Guidelines og FSP 3.2.2. Ved tvivl gælder guidelines.</p>
+              <p className="mt-1 text-xs text-white/60">PDF'erne læses i browseren; tekstindholdet tjekkes mod PA Guidelines og FSP 3.2.2. Ved tvivl gælder guidelines.</p>
             </div>
 
             <div className="flex items-center gap-3 text-sm">
@@ -444,5 +444,6 @@ function App() {
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4bc70e2c01a94c73b74392e4234840661791215815920" integrity="sha512-L0ha0OXavK/8okipN9F8BtP84dg9DUhPERbBXzwI6dgTA55d2+yweo3pn5CSFYs45/r8md2+xvUPtTdvTNRfjA==" nonce="Gypt4yALqVNQSxEBI+Sxaw==" data-cf-beacon='{"version":"2024.11.0","token":"36b4216ae2dc4d5488c249161e71fe1e","spa":2}' crossorigin="anonymous"></script>
 </body>
 </html>
