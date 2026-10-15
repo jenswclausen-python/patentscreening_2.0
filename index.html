@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PatentScreen – Screening af patentansøgninger</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f4f6f9; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useCallback } = React;
+
+/* ============================== Regelsæt ============================== */
+const DOCS = [
+  { id: "blanket", label: "Ansøgningsblanket", req: true, desc: "PA-blanket med ansøger, opfindere og erklæringer." },
+  { id: "beskrivelse", label: "Beskrivelse", req: true, desc: "Beskrivelse af opfindelsen med titel og figurreferencer." },
+  { id: "krav", label: "Patentkrav", req: true, desc: "Nummererede krav, fortløbende og entydige." },
+  { id: "sammendrag", label: "Sammendrag", req: true, desc: "Maks. 150 ord." },
+  { id: "tegninger", label: "Tegninger", req: false, desc: "Sorte linjer, nummererede figurer, ingen tekst." },
+  { id: "kommentarer", label: "Kommentarer", req: false, desc: "Fritekst og/eller supplerende fil." },
+];
+
+const RULES = {
+  g1: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Ansøgeroplysninger mangler", detail: "Ansøgningen skal indeholde oplysninger om ansøger.", fix: "Udfyld ansøgerens navn og adresse i blanketten.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  g2: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Opfinder ikke angivet", detail: "Opfinder skal angives, eller der skal være begrundet anmodning om undtagelse.", fix: "Angiv opfinder, eller vedlæg begrundet anmodning om undtagelse.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: true, fmBrev: "FM Brev 2" },
+  g3: { sev: "mangler", doc: "Beskrivelse", rule: "Beskrivelse mangler / utilgængelig tekst", detail: "En beskrivelse er en betingelse for at kunne tildele en indleveringsdag. Teksten kunne ikke udtrækkes af PDF'en.", fix: "Upload beskrivelsen som PDF med søgbart tekstlag.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  g4: { sev: "mangler", doc: "Patentkrav", rule: "Ingen patentkrav fundet", detail: "Ansøgningen skal indeholde mindst ét patentkrav.", fix: "Vedlæg patentkrav, mindst krav 1.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  g5: { sev: "mangler", doc: "Sammendrag", rule: "Sammendrag mangler", detail: "Sammendrag skal ledsage ansøgningen.", fix: "Upload sammendrag (maks. 150 ord).", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  g6: { sev: "mangler", doc: "Alle bilag", rule: "Fuldmagt mangler", detail: "Ved indgivelse via anden repræsentant end IP-rådgiver kræves skriftlig fuldmagt.", fix: "Vedlæg fuldmagt, eller indgiv i eget navn.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling · FSP 3.2.2 pkt. 11.1", henlaeggelse: true, fmBrev: "FM Brev 2" },
+  g7: { sev: "advarsel", doc: "Tegninger", rule: "Henvisning til manglende tegninger", detail: "Beskrivelsen henviser til tegninger, der ikke er vedlagt. Kan medføre ændring af indleveringsdag.", fix: "Upload tegningerne nu, eller fjern figurreferencerne i beskrivelsen.", source: "guidelines", ref: "PA Guidelines · Senere indlevering af dele af beskrivelsen", henlaeggelse: false, fmBrev: "FM Brev 1/3" },
+  p2: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Opfindererklæring mangler", detail: "Der skal være en erklæring pr. opfinder om, hvordan ansøger har opnået retten til opfindelsen. Kræves ikke, hvis ansøger og opfinder er samme person.", fix: "Indhent erklæring pr. opfinder (fuldmægtig kan underskrive for ansøger).", source: "procedure", ref: "FSP 3.2.2 pkt. 7.2", henlaeggelse: true, fmBrev: "FM Brev 2" },
+  p3: { sev: "mangler", doc: "Alle bilag", rule: "Sprog ikke godkendt", detail: "Patentansøgningen skal være på dansk, engelsk, norsk eller svensk. Andre sprog udløser mangelbrev med henlæggelse.", fix: "Indlever beskrivelse, krav og sammendrag på dansk eller engelsk.", source: "procedure", ref: "FSP 3.2.2 pkt. 8 og 9.1", henlaeggelse: true, fmBrev: "FM Brev 2" },
+  p4: { sev: "advarsel", doc: "Patentkrav", rule: "Krav ikke korrekt nummereret", detail: "Der skal være fortløbende nummererede krav. Krav ud over 10 stk. udløser kravgebyr (300 kr. pr. krav) — kun opgørelse, betaling verificeres i Easyflow.", fix: "Nummerér kravene fortløbende og sammenhold med gebyropgørelsen.", source: "procedure", ref: "FSP 3.2.2 pkt. 7.1 og 8", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  p5: { sev: "advarsel", doc: "Tegninger", rule: "Fotos med identificerbare personer", detail: "Indsendte fotos/billeder må ikke indeholde identificerbare personer — der er ikke hjemmel til at offentliggøre dem.", fix: "Indlever nye fotos med slørede ansigter eller beskær de oprindelige.", source: "procedure", ref: "FSP 3.2.2 pkt. 8", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  p6: { sev: "advarsel", doc: "Sammendrag", rule: "Sammendrag overstiger 150 ord", detail: "Sammendraget må maks. være på 150 ord.", fix: "Kort sammendraget til maks. 150 ord.", source: "procedure", ref: "FSP 3.2.2 pkt. 7.2", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  p7: { sev: "advarsel", doc: "Alle bilag", rule: "Sekvensliste ikke som XML jf. ST.26", detail: "Sekvenslisten skal indleveres som separat XML-fil, der opfylder WIPO Standard ST.26.", fix: "Indlever sekvensliste som XML-fil, der validerer uden errors (tjek evt. med Biosekvensgruppen).", source: "procedure", ref: "FSP 3.2.2 pkt. 8.4", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  p8: { sev: "advarsel", doc: "Ansøgningsblanket", rule: "Prioritet ældre end 12 mdr. / prioritetsdokument mangler", detail: "Prioritetsdatoen må maks. være 12 mdr. gammel ved indlevering; prioritetsdokumentet skal modtages inden 16 mdr. fra prioritetsdatoen.", fix: "Indsend prioritetsdokument (evt. via DAS-kode) rettidigt, eller send brev om bortfald af prioritet.", source: "procedure", ref: "FSP 3.2.2 pkt. 11.2 og 11.2.4", henlaeggelse: false, fmBrev: "FM Brev 4" },
+};
+
+/* =============== PDF-tekstudtrækning (pdf.js, i browseren) =============== */
+async function extractPdfText(file) {
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  let text = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map((it) => it.str).join(" ") + "\n";
+  }
+  return { text: text.replace(/\s+/g, " ").trim(), pages: pdf.numPages };
+}
+
+/* ================== Indholdsbaserede tjeks pr. bilag ================== */
+function screenDocContent(docId, text, extra) {
+  const findings = [];
+  const t = (text || "").toLowerCase();
+
+  if (docId === "blanket") {
+    const applicant = /(ansøger|applicant|cvr)/i.test(text || "");
+    if (!applicant) findings.push("g1");
+    const inventor = /(opfinder|inventor)/i.test(text || "");
+    if (!inventor) findings.push("g2");
+    else if (!/(erklær|decl|ret til opfindelsen|acquired the right)/i.test(text || "")) findings.push("p2");
+    if (extra.harPrioritet && !/(prioritetsdokument|priority document|das/i.test(text || "")) ) findings.push("p8");
+  }
+  if (docId === "beskrivelse") {
+    if (!text || text.length < 50) findings.push("g3");
+  }
+  if (docId === "krav") {
+    const claimMatch = (text || "").match(/(?:^|\s)(?:krav|claim)\s*\.?\s*(\d+)/i) || (text || "").match(/^\s*(\d+)\s*\./m);
+    if (!text || !claimMatch) findings.push("g4");
+    else {
+      const nums = (text.match(/(?:krav|claim)\s*\.?\s*(\d+)/gi) || []).map(s => parseInt(s.replace(/\D+/g, ""), 10)).filter(n => !isNaN(n));
+      const maxN = nums.length ? Math.max(...nums) : 0;
+      if (maxN > 0 && new Set(nums).size !== nums.length) findings.push("p4");
+      if (maxN > extra.antalKrav) extra.claimsInDoc = maxN;
+    }
+  }
+  if (docId === "sammendrag") {
+    if (!text || text.length < 30) findings.push("g5");
+    else {
+      const words = text.split(/\s+/).length;
+      if (words > 150) findings.push("p6");
+    }
+  }
+  if (docId === "tegninger") {
+    if (/(foto|billede|photograph|photo)/i.test(text || "")) findings.push("p5");
+  }
+  return findings;
+}
+
+function computeScore(mangler, advarsler) {
+  return Math.max(1, Math.min(10, 10 - mangler * 2 - advarsler));
+}
+function scoreVerdict(score) {
+  if (score >= 9) return "Klar til indgivelse";
+  if (score >= 7) return "Næsten klar — få ting skal rettes";
+  if (score >= 4) return "Ikke klar — flere mangler skal rettes";
+  return "Langt fra klar — gennemgå alle mangler";
+}
+
+/* ============================== UI ============================== */
+function fmtSize(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function Badge({ tone, children }) {
+  const tones = {
+    ok: "bg-[#1a7f4b] text-white",
+    err: "bg-[#c0392b] text-white",
+    warn: "bg-amber-100 text-[#b26a00] border border-amber-300",
+    outline: "border border-[#1c3f6e] text-[#1c3f6e]",
+    neutral: "bg-white border border-slate-300 text-slate-500",
+    proc: "border border-slate-400 text-slate-500",
+    henl: "border border-[#c0392b] bg-red-50 text-[#c0392b]",
+    req: "bg-white border border-[#c0392b] text-[#c0392b]",
+    optional: "bg-slate-200 text-slate-600",
+  };
+  return <span className={"inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium " + tones[tone]}>{children}</span>;
+}
+
+function App() {
+  const [view, setView] = useState("indlevering");
+  const [docState, setDocState] = useState({});
+  const [sprog, setSprog] = useState("dansk");
+  const [fuldmaegtig, setFuldmaegtig] = useState("ansoger");
+  const [sekvenser, setSekvenser] = useState("nej");
+  const [antalKrav, setAntalKrav] = useState("1");
+  const [harPrioritet, setHarPrioritet] = useState("nej");
+  const [rapportEnabled, setRapportEnabled] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const setDoc = useCallback((id, patch) => {
+    setDocState(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }));
+    setRapportEnabled(false);
+  }, []);
+
+  async function handleFile(docId, file) {
+    if (!file) return;
+    setDoc(docId, { file: { name: file.name, size: file.size }, text: "", pages: 0, reading: true, findings: [] });
+    try {
+      const { text, pages } = await extractPdfText(file);
+      setDoc(docId, { reading: false, text, pages });
+    } catch {
+      setDoc(docId, { reading: false, text: "", pages: 0 });
+    }
+  }
+
+  const uploaded = DOCS.filter(d => docState[d.id]?.file).length;
+  const requiredMissing = DOCS.filter(d => d.req && !docState[d.id]?.file).length;
+
+  function screen() {
+    setBusy(true);
+    setTimeout(() => {
+      setBusy(false);
+      setRapportEnabled(true);
+      setView("rapport");
+    }, 600);
+  }
+
+  /* Screeningslogik — kører på reelt udtrukket tekst */
+  const extra = { antalKrav: parseInt(antalKrav || "0", 10), harPrioritet: harPrioritet === "ja", claimsInDoc: 0 };
+  const findings = [];
+  for (const d of DOCS) {
+    const st = docState[d.id];
+    if (d.req && !st?.file) {
+      const map = { blanket: "g1", beskrivelse: "g3", krav: "g4", sammendrag: "g5" };
+      const r = RULES[map[d.id]];
+      findings.push({ ...r, id: r.id + "-m", detail: r.detail + " (Bilag ikke uploadet.)" });
+    } else if (st?.file) {
+      const hits = screenDocContent(d.id, st.text, extra);
+      hits.forEach(h => findings.push(RULES[h]));
+      if (hits.length === 0) {
+        findings.push({ id: "ok-" + d.id, sev: "ok", doc: d.label, rule: d.label + " modtaget", detail: d.id === "beskrivelse" ? "Indleveringsdag kan tildeles." : "Formelt krav opfyldt.", fix: "", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling" });
+      }
+    }
+  }
+  if (["fransk", "tysk", "andet"].includes(sprog)) findings.push(RULES.p3);
+  if (fuldmaegtig === "annen") findings.push(RULES.g6);
+  if (sekvenser === "ja") findings.push(RULES.p7);
+  if (extra.harPrioritet) findings.push(RULES.p8);
+  const kravAntal = Math.max(extra.claimsInDoc || 0, extra.antalKrav);
+  const gebyr = 3000 + Math.max(0, kravAntal - 10) * 300;
+
+  const mangler = findings.filter(f => f.sev === "mangler");
+  const advarsler = findings.filter(f => f.sev === "advarsel");
+  const okFinds = findings.filter(f => f.sev === "ok");
+  const henlMangler = mangler.filter(f => f.henlaeggelse);
+  const score = computeScore(mangler.length, advarsler.length);
+
+  const inputCls = "h-8 w-full rounded border border-slate-300 bg-white px-2 text-xs";
+  const labelCls = "text-xs font-medium text-slate-600";
+
+  function DocCard({ doc }) {
+    const st = docState[doc.id] || {};
+    const hasFile = !!st.file;
+    const docFindings = (st.text !== undefined && hasFile) ? screenDocContent(doc.id, st.text, { ...extra }) : [];
+    const hasDefect = hasFile && !st.reading && docFindings.length > 0;
+    const border = hasDefect ? "border-l-[#c0392b]" : hasFile ? "border-l-[#1a7f4b]" : "border-l-slate-300";
+    const badge = !hasFile
+      ? (doc.req ? <Badge tone="req">Påkrævet</Badge> : <Badge tone="optional">Valgfri</Badge>)
+      : hasDefect ? <Badge tone="err">Fund i screening</Badge> : <Badge tone="ok">I orden</Badge>;
+
+    return (
+      <div className={"rounded-lg border border-slate-200 border-l-4 bg-white p-4 " + border}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800">
+              {doc.label} {badge}
+            </div>
+            <p className="mt-1 text-xs text-slate-500">{doc.desc}</p>
+            {hasFile && (
+              <p className="mt-2 text-xs text-slate-500">
+                {st.file.name} · {fmtSize(st.file.size)}{st.pages ? " · " + st.pages + " sider" : ""}
+                {st.reading ? " · læser PDF …" : (!st.text ? " · intet tekstlag fundet" : " · " + st.text.split(/\s+/).length + " ord læst")}
+              </p>
+            )}
+            {hasDefect && (
+              <p className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-[#c0392b]">
+                {docFindings.map(h => RULES[h].rule + " → " + (RULES[h].fmBrev || "intet FM-brev")).join(" · ")}
+              </p>
+            )}
+          </div>
+          <div className="w-32 shrink-0 space-y-1.5">
+            <label className="block">
+              <input type="file" accept="application/pdf,.pdf" className="hidden"
+                onChange={(e) => { handleFile(doc.id, e.target.files[0]); e.target.value = ""; }} />
+              <span className="inline-block w-full cursor-pointer rounded-md border border-slate-300 bg-white px-2 py-1 text-center text-xs hover:bg-slate-50">
+                {hasFile ? "Erstat fil" : "Vælg PDF"}
+              </span>
+            </label>
+            {hasFile && (
+              <button className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
+                onClick={() => setDoc(doc.id, { file: undefined, text: undefined, pages: 0, findings: [] })}>
+                Fjern fil
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen p-6">
+      <div className="mx-auto max-w-3xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-lg font-bold text-[#122b4a]">PatentScreen</h1>
+            <p className="text-xs text-slate-500">Screening af patentansøgningers bilag — PDF-indholdet læses reelt</p>
+          </div>
+          <div className="flex rounded-md border border-slate-200 bg-white p-1 text-xs">
+            <button className={"rounded px-3 py-1 " + (view === "indlevering" ? "bg-[#1c3f6e] text-white" : "text-slate-500")}
+              onClick={() => setView("indlevering")}>1 · Indlevering</button>
+            <button className={"rounded px-3 py-1 " + (view === "rapport" ? "bg-[#1c3f6e] text-white" : rapportEnabled ? "text-slate-500" : "cursor-not-allowed text-slate-300")}
+              onClick={() => rapportEnabled && setView("rapport")}
+              title={rapportEnabled ? "" : "Tryk 'Screen og fortsæt' for at se rapporten"}>
+              2 · Rapport {!rapportEnabled && "🔒"}
+            </button>
+          </div>
+        </div>
+
+        {view === "indlevering" ? (
+          <div className="space-y-4">
+            <div className="rounded-lg bg-[#122b4a] p-5 text-white">
+              <p className="text-xs uppercase tracking-wider text-white/60">Patent- og Varemærkestyrelsen · E-filing · Patentansøgning</p>
+              <h2 className="mt-1 text-xl font-semibold">Ny indlevering — upload og screening</h2>
+              <p className="mt-1 text-xs text-white/60">PDF'erne læses i browseren; tegstindholdet tjekkes mod PA Guidelines og FSP 3.2.2. Ved tvivl gælder guidelines.</p>
+            </div>
+
+            <div className="flex items-center gap-3 text-sm">
+              <span className="font-medium text-slate-700">{uploaded} af {DOCS.length} bilag</span>
+              <div className="h-2 w-48 overflow-hidden rounded bg-slate-200">
+                <div className="h-full bg-[#1a7f4b]" style={{ width: (uploaded / DOCS.length) * 100 + "%" }} />
+              </div>
+              {requiredMissing > 0 && <span className="text-xs text-[#c0392b]">{requiredMissing} påkrævede bilag mangler</span>}
+            </div>
+
+            <div className="space-y-3">
+              {DOCS.map(d => <DocCard key={d.id} doc={d} />)}
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <h3 className="text-sm font-semibold text-[#1c3f6e]">Ansøgningsdata (indgår i screeningen)</h3>
+              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                <div className="space-y-1">
+                  <label className={labelCls}>Sprog</label>
+                  <select className={inputCls} value={sprog} onChange={e => { setSprog(e.target.value); setRapportEnabled(false); }}>
+                    <option value="dansk">Dansk</option><option value="engelsk">Engelsk</option>
+                    <option value="norsk">Norsk</option><option value="svensk">Svensk</option>
+                    <option value="fransk">Fransk</option><option value="tysk">Tysk</option><option value="andet">Andet</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className={labelCls}>Indgives via</label>
+                  <select className={inputCls} value={fuldmaegtig} onChange={e => { setFuldmaegtig(e.target.value); setRapportEnabled(false); }}>
+                    <option value="ansoger">Ansøger selv</option>
+                    <option value="ip">IP-rådgiver (fuldmagt kræves ikke)</option>
+                    <option value="annen">Anden repræsentant (fuldmagt kræves)</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className={labelCls}>Sekvenser påberåbt</label>
+                  <select className={inputCls} value={sekvenser} onChange={e => { setSekvenser(e.target.value); setRapportEnabled(false); }}>
+                    <option value="nej">Nej</option><option value="ja">Ja — sekvensliste kræves (XML jf. ST.26)</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className={labelCls}>Prioritet påberåbt</label>
+                  <select className={inputCls} value={harPrioritet} onChange={e => { setHarPrioritet(e.target.value); setRapportEnabled(false); }}>
+                    <option value="nej">Nej</option><option value="ja">Ja</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className={labelCls}>Antal patentkrav (til gebyropgørelse)</label>
+                  <input type="number" min={1} className={inputCls} value={antalKrav}
+                    onChange={e => { setAntalKrav(e.target.value); setRapportEnabled(false); }} />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-4 rounded-lg border border-slate-200 bg-white p-4">
+              <p className="mr-auto text-xs text-slate-500">Screeningen kører mod PA Guidelines og FSP 3.2.2. Ved tvivl gælder guidelines.</p>
+              <button className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-50">Gem kladde</button>
+              <button disabled={requiredMissing > 0 || busy} onClick={screen}
+                className="rounded-md bg-[#1c3f6e] px-4 py-2 text-sm text-white hover:bg-[#122b4a] disabled:opacity-50">
+                {busy ? "Screener …" : "Screen og fortsæt →"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="overflow-hidden rounded-lg bg-gradient-to-br from-[#1c3f6e] to-[#122b4a] p-6 text-white">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center">
+                <div className="flex h-24 w-24 shrink-0 flex-col items-center justify-center rounded-full border-4 border-white/30">
+                  <span className="text-2xl font-bold">{score}<span className="text-sm text-white/70">/10</span></span>
+                </div>
+                <div className="flex-1">
+                  <h2 className="text-xl font-semibold">{scoreVerdict(score)}</h2>
+                  <p className="mt-1 text-sm text-white/80">
+                    {mangler.length} formel{mangler.length === 1 ? "" : "e"} mangel{mangler.length === 1 ? "" : "er"} og {advarsler.length} advarsle{advarsler.length === 1 ? "" : "r"} fundet.
+                    {henlMangler.length > 0 ? " " + henlMangler.length + " af manglerne medfører henlæggelse ved manglende svar (pkt. 9.1)." : ""}
+                    {" "}Ved tvivl gælder guidelines.
+                  </p>
+                  <div className="mt-3 flex gap-2 text-xs">
+                    <span className="rounded-full bg-[#c0392b] px-3 py-1">{mangler.length} mangler</span>
+                    <span className="rounded-full bg-[#b26a00] px-3 py-1">{advarsler.length} advarsler</span>
+                    <span className="rounded-full bg-[#1a7f4b] px-3 py-1">{okFinds.length} godkendt</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {(mangler.length > 0 || advarsler.length > 0) && (
+              <div className="rounded-lg border-2 border-[#1c3f6e]/30 bg-white p-4">
+                <h3 className="text-base font-semibold text-[#1c3f6e]">Hvad skal du rette — i rækkefølge</h3>
+                <p className="text-xs text-slate-500">Start øverst. Mangler skal rettes, før ansøgningen kan indgives.</p>
+                <ol className="mt-3 space-y-2">
+                  {[...mangler, ...advarsler].map((f, i) => (
+                    <li key={f.id + i} className="flex items-start gap-3 rounded-md bg-slate-50 px-3 py-2">
+                      <span className={"mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white " + (f.sev === "mangler" ? "bg-[#c0392b]" : "bg-[#b26a00]")}>{i + 1}</span>
+                      <div>
+                        <p className="text-sm text-slate-800">{f.fix}</p>
+                        <p className="text-xs text-slate-400">{f.doc} · {f.rule}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            <div className="rounded-lg border border-slate-200 border-l-4 border-l-[#1a7f4b] bg-white p-4">
+              <h3 className="text-sm font-semibold text-[#1a7f4b]">Hvad er allerede i orden</h3>
+              <ul className="mt-2 space-y-1 text-sm text-slate-700">
+                {okFinds.length === 0 && <li className="text-xs text-slate-400">Ingen bilag godkendt endnu.</li>}
+                {okFinds.map(f => <li key={f.id}>✓ {f.rule} <span className="text-xs text-slate-400">({f.doc})</span></li>)}
+              </ul>
+            </div>
+
+            <h3 className="pt-1 text-sm font-semibold text-slate-800">Detaljeret gennemgang med henvisninger</h3>
+            {[...mangler, ...advarsler].map((f, i) => (
+              <div key={f.id + i} className={"rounded-lg border border-slate-200 border-l-4 bg-white p-4 " + (f.sev === "mangler" ? "border-l-[#c0392b]" : "border-l-[#b26a00]")}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-slate-800">{f.rule}</span>
+                  <div className="flex shrink-0 flex-wrap items-center gap-2">
+                    {f.henlaeggelse && <Badge tone="henl">Henlæggelse ved manglende svar</Badge>}
+                    {f.fmBrev && <Badge tone="neutral">→ {f.fmBrev}</Badge>}
+                    <Badge tone={f.source === "guidelines" ? "outline" : "proc"}>{f.source === "guidelines" ? "Guidelines" : "Intern procedure"}</Badge>
+                    <Badge tone={f.sev === "mangler" ? "err" : "warn"}>{f.sev === "mangler" ? "Mangel" : "Advarsel"}</Badge>
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">{f.doc}</p>
+                <p className="mt-2 text-sm text-slate-700">{f.detail}</p>
+                <div className="mt-2 rounded-md bg-slate-50 px-3 py-2">
+                  <p className="text-xs text-slate-600">
+                    <span className="font-semibold text-[#1c3f6e]">Henvisning:</span> {f.ref}
+                    {f.source === "procedure" && <span className="ml-1 text-slate-400">(Ved tvivl gælder PA Guidelines.)</span>}
+                  </p>
+                </div>
+              </div>
+            ))}
+
+            <div className="rounded-lg border border-slate-200 border-l-4 border-l-slate-400 bg-white p-4">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-semibold text-slate-800">Gebyropgørelse</span>
+                <Badge tone="neutral">Opgørelse</Badge>
+              </div>
+              <p className="mt-2 text-sm text-slate-700">
+                Grundgebyr 3.000 kr.{kravAntal > 10 ? " + kravgebyr " + (kravAntal - 10) + " × 300 kr." : ""} = <span className="font-semibold">{gebyr.toLocaleString("da-DK")} kr.</span> ved {kravAntal} krav.
+              </p>
+              <div className="mt-2 rounded-md bg-slate-50 px-3 py-2">
+                <p className="text-xs text-slate-600">
+                  <span className="font-semibold text-[#1c3f6e]">Henvisning:</span> FSP 3.2.2 pkt. 7.1
+                  <span className="ml-1 text-slate-400">(Betalingsverifikation foretages i Easyflow og indgår ikke i screeningen.)</span>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pb-2">
+              <p className="text-xs text-slate-400">Screenet jf. PA Guidelines – Formalitetsbehandling og intern procedure FSP 3.2.2 (v40)</p>
+              <div className="space-x-2">
+                <button className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50">Eksportér rapport (PDF)</button>
+                <button className="rounded-md bg-[#1c3f6e] px-3 py-1.5 text-xs text-white hover:bg-[#122b4a]" onClick={() => setView("indlevering")}>Ret og screen igen</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
