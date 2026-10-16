@@ -9,6 +9,9 @@
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin></script>
 <script>pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";</script>
 <style>
   body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f4f6f9; }
@@ -20,18 +23,55 @@
 <script type="text/babel">
 const { useState, useCallback } = React;
 
-/* ============================== Regelsæt ============================== */
+/* ============================== Kategorier og tjeklister ============================== */
 const DOCS = [
-  { id: "blanket", label: "Ansøgningsblanket", req: true, desc: "PA-blanket med ansøger, opfindere og erklæringer." },
-  { id: "beskrivelse", label: "Beskrivelse", req: true, desc: "Beskrivelse af opfindelsen med titel og figurreferencer." },
-  { id: "krav", label: "Patentkrav", req: true, desc: "Nummererede krav, fortløbende og entydige." },
-  { id: "sammendrag", label: "Sammendrag", req: true, desc: "Maks. 150 ord." },
-  { id: "tegninger", label: "Tegninger", req: false, desc: "Sorte linjer, nummererede figurer, ingen tekst." },
-  { id: "kommentarer", label: "Kommentarer", req: false, desc: "Fritekst og/eller supplerende fil." },
+  { id: "blanket", label: "Ansøgningsblanket", req: true, desc: "PA-blanket med ansøger, opfindere og erklæringer.",
+    checks: [
+      { id: "ansoger", label: "Ansøger (navn og adresse)", group: "blanket" },
+      { id: "opfinder", label: "Opfinder angivet", group: "blanket" },
+      { id: "erklaring", label: "Erklæring om ret til opfindelsen pr. opfinder", group: "blanket" },
+      { id: "fuldmaegtig", label: "Fuldmægtig korrekt angivet (hvis relevant)", group: "blanket" },
+      { id: "prioritet", label: "Prioritetsoplysninger (hvis påberåbt)", group: "blanket" },
+      { id: "paBlanket", label: "Genkendelig PA-blanketstruktur", group: "blanket" },
+    ] },
+  { id: "beskrivelse", label: "Beskrivelse", req: true, desc: "Beskrivelse af opfindelsen med titel og figurreferencer.",
+    checks: [
+      { id: "titel", label: "Titel fundet", group: "beskrivelse" },
+      { id: "figHenvisning", label: "Figurreferencer konsistente med tegninger", group: "beskrivelse" },
+      { id: "tekstlag", label: "Læsbart tekstlag", group: "beskrivelse" },
+      { id: "relevans", label: "Patentrelevant indhold", group: "beskrivelse" },
+    ] },
+  { id: "krav", label: "Patentkrav", req: true, desc: "Nummererede krav, fortløbende og entydige.",
+    checks: [
+      { id: "mindstEt", label: "Mindst ét krav", group: "krav" },
+      { id: "nummerering", label: "Fortløbende nummerering", group: "krav" },
+      { id: "antal", label: "Antal krav klar (til gebyropgørelse)", group: "krav" },
+      { id: "relevans", label: "Patentrelevant indhold", group: "krav" },
+    ] },
+  { id: "sammendrag", label: "Sammendrag", req: true, desc: "Maks. 150 ord.",
+    checks: [
+      { id: "findes", label: "Sammendrag findes", group: "sammendrag" },
+      { id: "ordgraense", label: "Højst 150 ord", group: "sammendrag" },
+      { id: "relevans", label: "Patentrelevant indhold", group: "sammendrag" },
+    ] },
+  { id: "tegninger", label: "Tegninger", req: false, desc: "Sorte linjer, nummererede figurer, ingen tekst.",
+    checks: [
+      { id: "figNumre", label: "Figurnumre til stede", group: "tegninger" },
+      { id: "ingenTekst", label: "Ingen tekst i figurerne", group: "tegninger" },
+      { id: "fotosPersoner", label: "Fotos uden identificerbare personer", group: "tegninger" },
+    ] },
+  { id: "kommentarer", label: "Kommentarer", req: false, desc: "Fritekst og/eller supplerende fil." , checks: [] },
 ];
 
+/* ============================== Regler ============================== */
 const RULES = {
-  g1: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Ansøgeroplysninger mangler", detail: "Ansøgningen skal indeholde oplysninger om ansøger.", fix: "Udfyld ansøgerens navn og adresse i blanketten.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  rel_blanket: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Dokumentet ligner ikke en ansøgningsblanket", detail: "Relevanskontrol: PDF'en indeholder ingen genkendelige træk fra en patentansøgning (PA-blanketstruktur, ansøger/opfinder-felter). Tjek at det rigtige bilag er uploadet.", fix: "Upload selve ansøgningsblanketten (PA 201-format), ikke kvitteringer eller andet materiale.", source: "procedure", ref: "FSP 3.2.2 pkt. 7.2", henlaeggelse: false, fmBrev: null },
+  rel_beskrivelse: { sev: "mangler", doc: "Beskrivelse", rule: "Dokumentet ligner ikke en patentbeskrivelse", detail: "Relevanskontrol: PDF'en indeholder ingen patentfaglige træk (opfindelse, titel, figurhenvisninger, teknisk beskrivelse).", fix: "Upload beskrivelsen af opfindelsen.", source: "procedure", ref: "FSP 3.2.2 pkt. 8", henlaeggelse: false, fmBrev: null },
+  rel_krav: { sev: "mangler", doc: "Patentkrav", rule: "Dokumentet ligner ikke patentkrav", detail: "Relevanskontrol: PDF'en indeholder ingen nummererede krav med patentfaglige vendinger.", fix: "Upload patentkravene.", source: "procedure", ref: "FSP 3.2.2 pkt. 8", henlaeggelse: false, fmBrev: null },
+  rel_sammendrag: { sev: "mangler", doc: "Sammendrag", rule: "Dokumentet ligner ikke et sammendrag", detail: "Relevanskontrol: PDF'en indeholder ingen patentfaglige træk og ligner ikke et sammendrag af en opfindelse.", fix: "Upload sammendraget (maks. 150 ord).", source: "procedure", ref: "FSP 3.2.2 pkt. 8", henlaeggelse: false, fmBrev: null },
+  rel_tegninger: { sev: "advarsel", doc: "Tegninger", rule: "Dokumentet ligner ikke patenttegninger", detail: "Relevanskontrol: PDF'en ligner ikke tegninger (ingen figurnumre, tekstbaseret indhold).", fix: "Upload tegningerne som PDF, eller fjern kategorien.", source: "procedure", ref: "FSP 3.2.2 pkt. 8", henlaeggelse: false, fmBrev: null },
+  dup: { sev: "mangler", doc: "Alle bilag", rule: "Samme fil er uploadet flere gange", detail: "Duplikatkontrol: Filens indhold er identisk med en fil i en anden kategori. Hvert bilag skal være et selvstændigt dokument.", fix: "Fjern duplikatet og upload det korrekte bilag i hver kategori.", source: "procedure", ref: "FSP 3.2.2 pkt. 7–8", henlaeggelse: false, fmBrev: null },
+  g1: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Ansøgeroplysninger mangler", detail: "Ansøgningen skal indeholde oplysninger om ansøger (navn og adresse).", fix: "Udfyld ansøgerens navn og adresse i blanketten.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
   g2: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Opfinder ikke angivet", detail: "Opfinder skal angives, eller der skal være begrundet anmodning om undtagelse.", fix: "Angiv opfinder, eller vedlæg begrundet anmodning om undtagelse.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: true, fmBrev: "FM Brev 2" },
   g3: { sev: "mangler", doc: "Beskrivelse", rule: "Beskrivelse mangler / utilgængelig tekst", detail: "En beskrivelse er en betingelse for at kunne tildele en indleveringsdag. Teksten kunne ikke udtrækkes af PDF'en.", fix: "Upload beskrivelsen som PDF med søgbart tekstlag.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
   g4: { sev: "mangler", doc: "Patentkrav", rule: "Ingen patentkrav fundet", detail: "Ansøgningen skal indeholde mindst ét patentkrav.", fix: "Vedlæg patentkrav, mindst krav 1.", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling (PL § 8 / BEK § 3)", henlaeggelse: false, fmBrev: "FM Brev 3" },
@@ -40,65 +80,101 @@ const RULES = {
   g7: { sev: "advarsel", doc: "Tegninger", rule: "Henvisning til manglende tegninger", detail: "Beskrivelsen henviser til tegninger, der ikke er vedlagt. Kan medføre ændring af indleveringsdag.", fix: "Upload tegningerne nu, eller fjern figurreferencerne i beskrivelsen.", source: "guidelines", ref: "PA Guidelines · Senere indlevering af dele af beskrivelsen", henlaeggelse: false, fmBrev: "FM Brev 1/3" },
   p2: { sev: "mangler", doc: "Ansøgningsblanket", rule: "Opfindererklæring mangler", detail: "Der skal være en erklæring pr. opfinder om, hvordan ansøger har opnået retten til opfindelsen. Kræves ikke, hvis ansøger og opfinder er samme person.", fix: "Indhent erklæring pr. opfinder (fuldmægtig kan underskrive for ansøger).", source: "procedure", ref: "FSP 3.2.2 pkt. 7.2", henlaeggelse: true, fmBrev: "FM Brev 2" },
   p3: { sev: "mangler", doc: "Alle bilag", rule: "Sprog ikke godkendt", detail: "Patentansøgningen skal være på dansk, engelsk, norsk eller svensk. Andre sprog udløser mangelbrev med henlæggelse.", fix: "Indlever beskrivelse, krav og sammendrag på dansk eller engelsk.", source: "procedure", ref: "FSP 3.2.2 pkt. 8 og 9.1", henlaeggelse: true, fmBrev: "FM Brev 2" },
-  p4: { sev: "advarsel", doc: "Patentkrav", rule: "Krav ikke korrekt nummereret", detail: "Der skal være fortløbende nummererede krav. Krav ud over 10 stk. udløser kravgebyr (300 kr. pr. krav) — kun opgørelse, betaling verificeres i Easyflow.", fix: "Nummerér kravene fortløbende og sammenhold med gebyropgørelsen.", source: "procedure", ref: "FSP 3.2.2 pkt. 7.1 og 8", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  p4: { sev: "advarsel", doc: "Patentkrav", rule: "Krav ikke korrekt nummereret", detail: "Der skal være fortløbende nummererede krav.", fix: "Nummerér kravene fortløbende.", source: "procedure", ref: "FSP 3.2.2 pkt. 7.1 og 8", henlaeggelse: false, fmBrev: "FM Brev 3" },
   p5: { sev: "advarsel", doc: "Tegninger", rule: "Fotos med identificerbare personer", detail: "Indsendte fotos/billeder må ikke indeholde identificerbare personer — der er ikke hjemmel til at offentliggøre dem.", fix: "Indlever nye fotos med slørede ansigter eller beskær de oprindelige.", source: "procedure", ref: "FSP 3.2.2 pkt. 8", henlaeggelse: false, fmBrev: "FM Brev 3" },
   p6: { sev: "advarsel", doc: "Sammendrag", rule: "Sammendrag overstiger 150 ord", detail: "Sammendraget må maks. være på 150 ord.", fix: "Kort sammendraget til maks. 150 ord.", source: "procedure", ref: "FSP 3.2.2 pkt. 7.2", henlaeggelse: false, fmBrev: "FM Brev 3" },
-  p7: { sev: "advarsel", doc: "Alle bilag", rule: "Sekvensliste ikke som XML jf. ST.26", detail: "Sekvenslisten skal indleveres som separat XML-fil, der opfylder WIPO Standard ST.26.", fix: "Indlever sekvensliste som XML-fil, der validerer uden errors (tjek evt. med Biosekvensgruppen).", source: "procedure", ref: "FSP 3.2.2 pkt. 8.4", henlaeggelse: false, fmBrev: "FM Brev 3" },
-  p8: { sev: "advarsel", doc: "Ansøgningsblanket", rule: "Prioritet ældre end 12 mdr. / prioritetsdokument mangler", detail: "Prioritetsdatoen må maks. være 12 mdr. gammel ved indlevering; prioritetsdokumentet skal modtages inden 16 mdr. fra prioritetsdatoen.", fix: "Indsend prioritetsdokument (evt. via DAS-kode) rettidigt, eller send brev om bortfald af prioritet.", source: "procedure", ref: "FSP 3.2.2 pkt. 11.2 og 11.2.4", henlaeggelse: false, fmBrev: "FM Brev 4" },
+  p7: { sev: "advarsel", doc: "Alle bilag", rule: "Sekvensliste ikke som XML jf. ST.26", detail: "Sekvenslisten skal indleveres som separat XML-fil, der opfylder WIPO Standard ST.26.", fix: "Indlever sekvensliste som XML-fil, der validerer uden errors.", source: "procedure", ref: "FSP 3.2.2 pkt. 8.4", henlaeggelse: false, fmBrev: "FM Brev 3" },
+  p8: { sev: "advarsel", doc: "Ansøgningsblanket", rule: "Prioritetsoplysninger mangler eller er ugyldige", detail: "Prioritetsdatoen må maks. være 12 mdr. gammel ved indlevering; prioritetsdokumentet skal modtages inden 16 mdr.", fix: "Indsend prioritetsdokument (evt. via DAS-kode) rettidigt, eller send brev om bortfald af prioritet.", source: "procedure", ref: "FSP 3.2.2 pkt. 11.2 og 11.2.4", henlaeggelse: false, fmBrev: "FM Brev 4" },
 };
 
-/* =============== PDF-tekstudtrækning (pdf.js, i browseren) =============== */
-async function extractPdfText(file) {
+/* ============================== PDF-tekstudtrækning + hash ============================== */
+async function extractPdf(file) {
   const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  const hash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
   const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
   let text = "";
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    text += content.items.map((it) => it.str).join(" ") + "\n";
+    text += content.items.map(it => it.str).join(" ") + "\n";
   }
-  return { text: text.replace(/\s+/g, " ").trim(), pages: pdf.numPages };
+  return { hash, text: text.replace(/\s+/g, " ").trim(), pages: pdf.numPages };
 }
 
-/* ================== Indholdsbaserede tjeks pr. bilag ================== */
-function screenDocContent(docId, text, extra) {
-  const findings = [];
+/* ============================== Relevansport ============================== */
+function relevanceGate(docId, text) {
   const t = (text || "").toLowerCase();
+  const signals = {
+    blanket: [/(ansøgning om patent|ansøgningsnr|applicant|patent- og varemærkestyrelsen|ansøger)/i, /(opfinder|inventor)/i],
+    beskrivelse: [/(opfindelse|invention|den foreliggende)/i, /(beskrivelse|description|teknisk område|technical field)/i],
+    krav: [/((?:krav|claim)s?\s*\.?\s*1\b|krav|hvorledes)/i, /(kendetegnende|characterized|characterised)/i],
+    sammendrag: [/(opfindelse|invention|sammendrag|abstract)/i, /(angår|relates to|omhandler|discloses)/i],
+    tegninger: [/(fig\.?\s*\d|figur)/i],
+  };
+  const list = signals[docId] || [];
+  let hits = 0;
+  for (const re of list) if (re.test(t)) hits++;
+  return { relevant: hits >= Math.min(2, list.length), hits, total: list.length };
+}
+
+/* ============================== Kategorispecifik tjekliste ============================== */
+function runChecks(docId, text, ctx) {
+  const results = [];
+  const t = (text || "").toLowerCase();
+  const add = (checkId, ruleId, ok, note) => results.push({ checkId, ruleId, ok, note: note || "" });
+  const gate = relevanceGate(docId, text);
+
+  if (!gate.relevant) {
+    const relRule = RULES["rel_" + docId];
+    if (relRule) add("relevans", "rel_" + docId, false, "Kun " + gate.hits + " af " + gate.total + " relevanssignaler fundet.");
+    return { results, gate };
+  }
+  add("relevans", null, true, gate.hits + " af " + gate.total + " relevanssignaler fundet.");
 
   if (docId === "blanket") {
-    const applicant = /(ansøger|applicant|cvr)/i.test(text || "");
-    if (!applicant) findings.push("g1");
-    const inventor = /(opfinder|inventor)/i.test(text || "");
-    if (!inventor) findings.push("g2");
-    else if (!/(erklær|decl|ret til opfindelsen|acquired the right)/i.test(text || "")) findings.push("p2");
-    if (extra.harPrioritet && !/(prioritetsdokument|priority document|das)/i.test(text || "")) findings.push("p8");
+    add("ansoger", "g1", /(ansøger|applicant|cvr)/i.test(t));
+    const hasInventor = /(opfinder|inventor)/i.test(t);
+    add("opfinder", "g2", hasInventor);
+    if (hasInventor) add("erklaring", "p2", /(erklær|decl|ret til opfindelsen|acquired the right)/i.test(t));
+    else add("erklaring", "p2", false, "Kan ikke vurderes — opfinder ikke angivet.");
+    add("fuldmaegtig", null, true, ctx.fuldmaegtig === "ip" || ctx.fuldmaektig === "ansoger" ? "Ikke krævet (ingen anden repræsentant)." : ctx.fuldmaektig === "annen" ? "Kræves — vedlæg fuldmagt." : "Ikke krævet.");
+    if (ctx.fuldmaektig === "annen") add("fuldmaegtig", "g6", false);
+    if (ctx.harPrioritet) add("prioritet", "p8", /(prioritetsdokument|priority document|das|prioritet)/i.test(t));
+    else add("prioritet", null, true, "Ingen prioritet påberåbt.");
+    add("paBlanket", null, /(ansøgning om patent|patent- og varemærkestyrelsen|referencenummer)/i.test(t), "Strukturgenkendelse af PA-blanket.");
   }
   if (docId === "beskrivelse") {
-    if (!text || text.length < 50) findings.push("g3");
+    add("tekstlag", "g3", !!(text && text.length >= 50));
+    add("titel", null, /(titel|title:|opfindelsens titel)/i.test(t) || /"([^"]{5,80})"/.test(t), "Titelfelt eller citeret titel søgt.");
+    const figRefs = (text || "").match(/fig\.?\s*\d+/gi) || [];
+    ctx.figRefs = figRefs.length;
+    add("figHenvisning", "g7", !(figRefs.length > 0 && !ctx.hasTegninger && ctx.tegningerUploaded === false), figRefs.length > 0 ? figRefs.length + " figurhenvisninger fundet." + (ctx.hasTegninger ? "" : " Tegninger ikke uploadet.") : "Ingen figurhenvisninger — ok hvis opfindelsen ikke kræver tegninger.");
+    if (figRefs.length > 0 && !ctx.hasTegninger) add("figHenvisning", "g7", false, "Beskrivelsen henviser til tegninger, der ikke er uploadet.");
   }
   if (docId === "krav") {
-    const claimMatch = (text || "").match(/(?:^|\s)(?:krav|claim)\s*\.?\s*(\d+)/i) || (text || "").match(/^\s*(\d+)\s*\./m);
-    if (!text || !claimMatch) findings.push("g4");
-    else {
-      const nums = (text.match(/(?:krav|claim)\s*\.?\s*(\d+)/gi) || []).map(s => parseInt(s.replace(/\D+/g, ""), 10)).filter(n => !isNaN(n));
-      const maxN = nums.length ? Math.max(...nums) : 0;
-      if (maxN > 0 && new Set(nums).size !== nums.length) findings.push("p4");
-      if (maxN > extra.antalKrav) extra.claimsInDoc = maxN;
-    }
+    const nums = (text || "").match(/(?:krav|claim)\s*\.?\s*(\d+)/gi) || [];
+    const parsed = nums.map(s => parseInt(s.replace(/\D+/g, ""), 10)).filter(n => !isNaN(n));
+    const unique = [...new Set(parsed)];
+    add("mindstEt", "g4", parsed.length > 0, parsed.length > 0 ? "Fundet krav nr. 1–" + Math.max(...parsed) + "." : "Ingen nummererede krav fundet.");
+    add("nummerering", "p4", parsed.length === 0 || unique.length === parsed.length, parsed.length > 0 ? parsed.length + " kravsnumre fundet, " + unique.length + " unikke." : "");
+    ctx.claimsInDoc = parsed.length > 0 ? Math.max(...parsed) : 0;
+    add("antal", null, true, ctx.claimsInDoc + " krav i dokumentet (til gebyropgørelse).");
   }
   if (docId === "sammendrag") {
-    if (!text || text.length < 30) findings.push("g5");
-    else {
-      const words = text.split(/\s+/).length;
-      if (words > 150) findings.push("p6");
-    }
+    const words = (text || "").split(/\s+/).filter(Boolean).length;
+    add("findes", "g5", !!(text && text.length >= 30), words + " ord læst.");
+    add("ordgraense", "p6", words > 0 && words <= 150, words + " ord (maks. 150).");
   }
   if (docId === "tegninger") {
-    if (/(foto|billede|photograph|photo)/i.test(text || "")) findings.push("p5");
+    add("figNumre", null, /fig\.?\s*\d+/i.test(t));
+    add("ingenTekst", null, (text || "").split(/\s+/).filter(Boolean).length < 80, "Tegninger bør indeholde få ord (signaturforklaring er ok).");
+    add("fotosPersoner", "p5", !/(foto|billede|photograph|photo)/i.test(t));
   }
-  return findings;
+  return { results, gate };
 }
 
+/* ============================== Score ============================== */
 function computeScore(mangler, advarsler) {
   return Math.max(1, Math.min(10, 10 - mangler * 2 - advarsler));
 }
@@ -109,17 +185,57 @@ function scoreVerdict(score) {
   return "Langt fra klar — gennemgå alle mangler";
 }
 
+/* ============================== PDF-eksport af rapporten ============================== */
+function exportReport({ score, verdict, findings, checks, gebyr, kravAntal, docFiles }) {
+  const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let body = "";
+  body += "<h1>PatentScreen — screeningsrapport</h1>";
+  body += "<p>Dato: " + new Date().toLocaleDateString("da-DK") + " · Score: " + score + "/10 — " + esc(verdict) + "</p>";
+  body += "<p>Screenet jf. PA Guidelines – Formalitetsbehandling og intern procedure FSP 3.2.2 (v40).</p>";
+
+  body += "<h2>Detaljeret gennemgang pr. bilag</h2>";
+  for (const d of DOCS) {
+    const st = docFiles[d.id];
+    body += "<h3>" + esc(d.label) + (st && st.file ? " (" + esc(st.file.name) + ")" : " (ikke uploadet)") + "</h3>";
+    const rows = (checks[d.id] || []).map(c => {
+      const status = c.ok ? "OK" : (RULES[c.ruleId] ? (RULES[c.ruleId].sev === "mangler" ? "MANGEL" : "ADVARSEL") : "—");
+      return "<tr><td>" + esc(c.checkId) + "</td><td>" + esc(Object.values(DOCS.find(x => x.id === d.id).checks).length ? "" : "") + esc(labelOf(d, c.checkId)) + "</td><td>" + status + "</td><td>" + esc(c.note) + "</td></tr>";
+    }).join("");
+    body += "<table><tr><th>Tjek</th><th>Element</th><th>Status</th><th>Bemærkning</th></tr>" + rows + "</table>";
+  }
+
+  body += "<h2>Fund med henvisninger</h2>";
+  for (const f of findings) {
+    body += "<p><b>" + esc(f.rule) + "</b> (" + esc(f.doc) + ") — " + esc(f.sev) + (f.henlaeggelse ? " — henlæggelse ved manglende svar" : "") + "<br/>" + esc(f.detail) + "<br/>Henvisning: " + esc(f.ref) + " · " + esc(f.source === "guidelines" ? "Guidelines" : "Intern procedure") + (f.fmBrev ? " · " + esc(f.fmBrev) : "") + "</p>";
+  }
+  body += "<h2>Gebyropgørelse</h2>";
+  body += "<p>Grundgebyr 3.000 kr." + (kravAntal > 10 ? " + kravgebyr " + (kravAntal - 10) + " × 300 kr." : "") + " = " + gebyr.toLocaleString("da-DK") + " kr. ved " + kravAntal + " krav. (Betalingsverifikation foretages i Easyflow.)</p>";
+
+  const html = "<html><head><meta charset='utf-8'><title>PatentScreen-rapport</title><style>body{font-family:sans-serif;margin:30px}h1{color:#122b4a}h2{color:#1c3f6e;border-bottom:1px solid #ccc;padding-bottom:4px}h3{margin-bottom:2px}table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid #ccc;padding:4px 8px;text-align:left}td:nth-child(3){font-weight:bold}</style></head><body>" + body + "</body></html>";
+  const blob = new Blob([html], { type: "application/pdf" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "patentscreen-rapport.html";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+function labelOf(doc, checkId) {
+  const c = (doc.checks || []).find(x => x.id === checkId);
+  return c ? c.label : checkId;
+}
+
 /* ============================== UI ============================== */
 function fmtSize(n) {
   if (n < 1024) return n + " B";
   if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
   return (n / 1048576).toFixed(1) + " MB";
 }
-
 function Badge({ tone, children }) {
   const tones = {
-    ok: "bg-[#1a7f4b] text-white",
-    err: "bg-[#c0392b] text-white",
+    ok: "bg-[#1a7f4b] text-white", err: "bg-[#c0392b] text-white",
     warn: "bg-amber-100 text-[#b26a00] border border-amber-300",
     outline: "border border-[#1c3f6e] text-[#1c3f6e]",
     neutral: "bg-white border border-slate-300 text-slate-500",
@@ -134,8 +250,9 @@ function Badge({ tone, children }) {
 function App() {
   const [view, setView] = useState("indlevering");
   const [docState, setDocState] = useState({});
+  const [dupMsg, setDupMsg] = useState(null);
   const [sprog, setSprog] = useState("dansk");
-  const [fuldmaegtig, setFuldmaegtig] = useState("ansoger");
+  const [fuldmaektig, setFuldmaektig] = useState("ansoger");
   const [sekvenser, setSekvenser] = useState("nej");
   const [antalKrav, setAntalKrav] = useState("1");
   const [harPrioritet, setHarPrioritet] = useState("nej");
@@ -149,12 +266,19 @@ function App() {
 
   async function handleFile(docId, file) {
     if (!file) return;
-    setDoc(docId, { file: { name: file.name, size: file.size }, text: "", pages: 0, reading: true, findings: [] });
+    setDupMsg(null);
+    setDoc(docId, { file: { name: file.name, size: file.size }, reading: true });
     try {
-      const { text, pages } = await extractPdfText(file);
-      setDoc(docId, { reading: false, text, pages });
+      const { hash, text, pages } = await extractPdf(file);
+      const other = Object.entries(docState).find(([id, st]) => id !== docId && st && st.hash === hash);
+      if (other) {
+        setDupMsg("Filen '" + file.name + "' er identisk med filen under '" + DOCS.find(d => d.id === other[0]).label + "'. Samme dokument må ikke uploades i flere kategorier.");
+        setDoc(docId, { reading: false, dup: true });
+        return;
+      }
+      setDoc(docId, { reading: false, hash, text, pages, dup: false });
     } catch {
-      setDoc(docId, { reading: false, text: "", pages: 0 });
+      setDoc(docId, { reading: false, hash: null, text: "", pages: 0, dup: false });
     }
   }
 
@@ -163,15 +287,12 @@ function App() {
 
   function screen() {
     setBusy(true);
-    setTimeout(() => {
-      setBusy(false);
-      setRapportEnabled(true);
-      setView("rapport");
-    }, 600);
+    setTimeout(() => { setBusy(false); setRapportEnabled(true); setView("rapport"); }, 600);
   }
 
-  /* Screeningslogik — kører på reelt udtrukket tekst */
-  const extra = { antalKrav: parseInt(antalKrav || "0", 10), harPrioritet: harPrioritet === "ja", claimsInDoc: 0 };
+  /* --- Screening: relevansport + tjeklister pr. kategori --- */
+  const ctx = { fuldmaektig, harPrioritet: harPrioritet === "ja", hasTegninger: !!docState.tegninger?.file, claimsInDoc: 0, figRefs: 0 };
+  const checks = {};
   const findings = [];
   for (const d of DOCS) {
     const st = docState[d.id];
@@ -179,19 +300,23 @@ function App() {
       const map = { blanket: "g1", beskrivelse: "g3", krav: "g4", sammendrag: "g5" };
       const r = RULES[map[d.id]];
       findings.push({ ...r, id: r.id + "-m", detail: r.detail + " (Bilag ikke uploadet.)" });
-    } else if (st?.file) {
-      const hits = screenDocContent(d.id, st.text, extra);
-      hits.forEach(h => findings.push(RULES[h]));
-      if (hits.length === 0) {
-        findings.push({ id: "ok-" + d.id, sev: "ok", doc: d.label, rule: d.label + " modtaget", detail: d.id === "beskrivelse" ? "Indleveringsdag kan tildeles." : "Formelt krav opfyldt.", fix: "", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling" });
+      checks[d.id] = [{ checkId: "uploadet", ruleId: map[d.id], ok: false, note: "Påkrævet bilag mangler." }];
+    } else if (st?.file && !st.dup) {
+      const { results } = runChecks(d.id, st.text, ctx);
+      checks[d.id] = results;
+      for (const r of results) {
+        if (!r.ok && r.ruleId) findings.push(RULES[r.ruleId]);
       }
+      const allOk = results.every(r => r.ok);
+      if (allOk && d.checks.length > 0) findings.push({ id: "ok-" + d.id, sev: "ok", doc: d.label, rule: d.label + " — alle tjek bestået", detail: "Alle " + d.checks.length + " elementer i tjeklisten er kontrolleret og godkendt.", fix: "", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling" });
+    } else if (st?.dup) {
+      findings.push(RULES.dup);
     }
   }
   if (["fransk", "tysk", "andet"].includes(sprog)) findings.push(RULES.p3);
-  if (fuldmaegtig === "annen") findings.push(RULES.g6);
+  if (fuldmaektig === "annen") findings.push(RULES.g6);
   if (sekvenser === "ja") findings.push(RULES.p7);
-  if (extra.harPrioritet) findings.push(RULES.p8);
-  const kravAntal = Math.max(extra.claimsInDoc || 0, extra.antalKrav);
+  const kravAntal = Math.max(ctx.claimsInDoc || 0, parseInt(antalKrav || "0", 10));
   const gebyr = 3000 + Math.max(0, kravAntal - 10) * 300;
 
   const mangler = findings.filter(f => f.sev === "mangler");
@@ -206,32 +331,47 @@ function App() {
   function DocCard({ doc }) {
     const st = docState[doc.id] || {};
     const hasFile = !!st.file;
-    const docFindings = (st.text !== undefined && hasFile) ? screenDocContent(doc.id, st.text, { ...extra }) : [];
-    const hasDefect = hasFile && !st.reading && docFindings.length > 0;
-    const border = hasDefect ? "border-l-[#c0392b]" : hasFile ? "border-l-[#1a7f4b]" : "border-l-slate-300";
+    const docChecks = checks[doc.id] || [];
+    const fails = docChecks.filter(c => !c.ok);
+    const border = st.dup ? "border-l-[#c0392b]" : fails.length > 0 ? "border-l-[#b26a00]" : hasFile ? "border-l-[#1a7f4b]" : "border-l-slate-300";
     const badge = !hasFile
       ? (doc.req ? <Badge tone="req">Påkrævet</Badge> : <Badge tone="optional">Valgfri</Badge>)
-      : hasDefect ? <Badge tone="err">Fund i screening</Badge> : <Badge tone="ok">I orden</Badge>;
+      : st.dup ? <Badge tone="err">Duplikat</Badge>
+      : st.reading ? <Badge tone="neutral">Læser …</Badge>
+      : fails.length === 0 ? <Badge tone="ok">I orden</Badge>
+      : <Badge tone="warn">{fails.length} fund</Badge>;
 
     return (
       <div className={"rounded-lg border border-slate-200 border-l-4 bg-white p-4 " + border}>
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-slate-800">
               {doc.label} {badge}
             </div>
             <p className="mt-1 text-xs text-slate-500">{doc.desc}</p>
             {hasFile && (
               <p className="mt-2 text-xs text-slate-500">
-                {st.file.name} · {fmtSize(st.file.size)}{st.pages ? " · " + st.pages + " sider" : ""}
-                {st.reading ? " · læser PDF …" : (!st.text ? " · intet tekstlag fundet" : " · " + st.text.split(/\s+/).length + " ord læst")}
+                {st.file.name} · {fmtSize(st.file.size)}{st.pages ? " · " + st.pages + " sider" : ""}{st.reading ? " · læser …" : (st.text ? " · " + st.text.split(/\s+/).length + " ord" : " · intet tekstlag")}
               </p>
             )}
-            {hasDefect && (
-              <p className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-[#c0392b]">
-                {docFindings.map(h => RULES[h].rule + " → " + (RULES[h].fmBrev || "intet FM-brev")).join(" · ")}
-              </p>
+            {hasFile && !st.reading && !st.dup && doc.checks.length > 0 && (
+              <div className="mt-2 rounded-md bg-slate-50 p-2">
+                <p className="mb-1 text-xs font-semibold text-slate-600">Tjekliste ({docChecks.filter(c => c.ok).length}/{doc.checks.length} ok):</p>
+                <ul className="space-y-1">
+                  {doc.checks.map(ck => {
+                    const st2 = docChecks.find(c => c.checkId === ck.id);
+                    const ok = st2 ? st2.ok : false;
+                    return (
+                      <li key={ck.id} className="text-xs text-slate-600">
+                        <span className={ok ? "text-[#1a7f4b]" : "text-[#c0392b]"}>{ok ? "✓" : "✕"}</span> {ck.label}
+                        {st2 && st2.note && <span className="text-slate-400"> — {st2.note}</span>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
             )}
+            {st.dup && <p className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-[#c0392b]">{dupMsg}</p>}
           </div>
           <div className="w-32 shrink-0 space-y-1.5">
             <label className="block">
@@ -243,7 +383,7 @@ function App() {
             </label>
             {hasFile && (
               <button className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                onClick={() => setDoc(doc.id, { file: undefined, text: undefined, pages: 0, findings: [] })}>
+                onClick={() => setDoc(doc.id, { file: undefined, text: undefined, hash: undefined, pages: 0, dup: false })}>
                 Fjern fil
               </button>
             )}
@@ -259,14 +399,12 @@ function App() {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-[#122b4a]">PatentScreen</h1>
-            <p className="text-xs text-slate-500">Screening af patentansøgningers bilag — PDF-indholdet læses reelt</p>
+            <p className="text-xs text-slate-500">Duplikatkontrol · relevansport · tjeklister pr. kategori · PDF-eksport</p>
           </div>
           <div className="flex rounded-md border border-slate-200 bg-white p-1 text-xs">
-            <button className={"rounded px-3 py-1 " + (view === "indlevering" ? "bg-[#1c3f6e] text-white" : "text-slate-500")}
-              onClick={() => setView("indlevering")}>1 · Indlevering</button>
+            <button className={"rounded px-3 py-1 " + (view === "indlevering" ? "bg-[#1c3f6e] text-white" : "text-slate-500")} onClick={() => setView("indlevering")}>1 · Indlevering</button>
             <button className={"rounded px-3 py-1 " + (view === "rapport" ? "bg-[#1c3f6e] text-white" : rapportEnabled ? "text-slate-500" : "cursor-not-allowed text-slate-300")}
-              onClick={() => rapportEnabled && setView("rapport")}
-              title={rapportEnabled ? "" : "Tryk 'Screen og fortsæt' for at se rapporten"}>
+              onClick={() => rapportEnabled && setView("rapport")} title={rapportEnabled ? "" : "Tryk 'Screen og fortsæt' for at se rapporten"}>
               2 · Rapport {!rapportEnabled && "🔒"}
             </button>
           </div>
@@ -277,7 +415,7 @@ function App() {
             <div className="rounded-lg bg-[#122b4a] p-5 text-white">
               <p className="text-xs uppercase tracking-wider text-white/60">Patent- og Varemærkestyrelsen · E-filing · Patentansøgning</p>
               <h2 className="mt-1 text-xl font-semibold">Ny indlevering — upload og screening</h2>
-              <p className="mt-1 text-xs text-white/60">PDF'erne læses i browseren; tekstindholdet tjekkes mod PA Guidelines og FSP 3.2.2. Ved tvivl gælder guidelines.</p>
+              <p className="mt-1 text-xs text-white/60">Hvert bilag gennemgår duplikatkontrol, relevansport og en fast tjekliste. Ved tvivl gælder guidelines.</p>
             </div>
 
             <div className="flex items-center gap-3 text-sm">
@@ -287,6 +425,10 @@ function App() {
               </div>
               {requiredMissing > 0 && <span className="text-xs text-[#c0392b]">{requiredMissing} påkrævede bilag mangler</span>}
             </div>
+
+            {dupMsg && (
+              <div className="rounded-md border border-[#c0392b] bg-red-50 px-3 py-2 text-xs text-[#c0392b]">{dupMsg}</div>
+            )}
 
             <div className="space-y-3">
               {DOCS.map(d => <DocCard key={d.id} doc={d} />)}
@@ -305,7 +447,7 @@ function App() {
                 </div>
                 <div className="space-y-1">
                   <label className={labelCls}>Indgives via</label>
-                  <select className={inputCls} value={fuldmaegtig} onChange={e => { setFuldmaegtig(e.target.value); setRapportEnabled(false); }}>
+                  <select className={inputCls} value={fuldmaektig} onChange={e => { setFuldmaektig(e.target.value); setRapportEnabled(false); }}>
                     <option value="ansoger">Ansøger selv</option>
                     <option value="ip">IP-rådgiver (fuldmagt kræves ikke)</option>
                     <option value="annen">Anden repræsentant (fuldmagt kræves)</option>
@@ -332,7 +474,7 @@ function App() {
             </div>
 
             <div className="flex items-center justify-end gap-4 rounded-lg border border-slate-200 bg-white p-4">
-              <p className="mr-auto text-xs text-slate-500">Screeningen kører mod PA Guidelines og FSP 3.2.2. Ved tvivl gælder guidelines.</p>
+              <p className="mr-auto text-xs text-slate-500">Duplikatkontrol, relevansport og tjeklister kører ved upload. Ved tvivl gælder guidelines.</p>
               <button className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-50">Gem kladde</button>
               <button disabled={requiredMissing > 0 || busy} onClick={screen}
                 className="rounded-md bg-[#1c3f6e] px-4 py-2 text-sm text-white hover:bg-[#122b4a] disabled:opacity-50">
@@ -384,33 +526,71 @@ function App() {
             <div className="rounded-lg border border-slate-200 border-l-4 border-l-[#1a7f4b] bg-white p-4">
               <h3 className="text-sm font-semibold text-[#1a7f4b]">Hvad er allerede i orden</h3>
               <ul className="mt-2 space-y-1 text-sm text-slate-700">
-                {okFinds.length === 0 && <li className="text-xs text-slate-400">Ingen bilag godkendt endnu.</li>}
+                {okFinds.length === 0 && <li className="text-xs text-slate-400">Ingen bilag fuldt godkendt endnu.</li>}
                 {okFinds.map(f => <li key={f.id}>✓ {f.rule} <span className="text-xs text-slate-400">({f.doc})</span></li>)}
               </ul>
             </div>
 
-            <h3 className="pt-1 text-sm font-semibold text-slate-800">Detaljeret gennemgang med henvisninger</h3>
-            {[...mangler, ...advarsler].map((f, i) => (
-              <div key={f.id + i} className={"rounded-lg border border-slate-200 border-l-4 bg-white p-4 " + (f.sev === "mangler" ? "border-l-[#c0392b]" : "border-l-[#b26a00]")}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-sm font-semibold text-slate-800">{f.rule}</span>
-                  <div className="flex shrink-0 flex-wrap items-center gap-2">
-                    {f.henlaeggelse && <Badge tone="henl">Henlæggelse ved manglende svar</Badge>}
-                    {f.fmBrev && <Badge tone="neutral">→ {f.fmBrev}</Badge>}
-                    <Badge tone={f.source === "guidelines" ? "outline" : "proc"}>{f.source === "guidelines" ? "Guidelines" : "Intern procedure"}</Badge>
-                    <Badge tone={f.sev === "mangler" ? "err" : "warn"}>{f.sev === "mangler" ? "Mangel" : "Advarsel"}</Badge>
+            <h3 className="pt-1 text-sm font-semibold text-slate-800">Detaljeret gennemgang pr. bilag</h3>
+            {DOCS.map(d => {
+              const rows = checks[d.id] || [];
+              const st = docState[d.id];
+              return (
+                <div key={d.id} className="rounded-lg border border-slate-200 bg-white p-4">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-slate-800">{d.label}{st?.file ? " — " + st.file.name : ""}</span>
+                    {d.req && !st?.file && <Badge tone="req">Mangler</Badge>}
+                    {rows.length > 0 && rows.every(r => r.ok) && <Badge tone="ok">Alle tjek bestået</Badge>}
+                    {rows.some(r => !r.ok) && <Badge tone="warn">Se fund</Badge>}
                   </div>
+                  {rows.length > 0 ? (
+                    <table className="mt-2 w-full text-xs">
+                      <tr className="text-slate-400"><td className="py-1">Tjek</td><td>Status</td><td>Bemærkning</td></tr>
+                      {rows.map((r, i) => {
+                        const label = labelOf(d, r.checkId);
+                        const sev = r.ok ? "ok" : (RULES[r.ruleId] ? RULES[r.ruleId].sev : "advarsel");
+                        return (
+                          <tr key={i} className="border-t border-slate-100">
+                            <td className="py-1 pr-2 text-slate-700">{label}</td>
+                            <td className="pr-2"><span className={r.ok ? "text-[#1a7f4b]" : sev === "mangler" ? "text-[#c0392b] font-semibold" : "text-[#b26a00] font-semibold"}>{r.ok ? "OK" : (sev === "mangler" ? "Mangel" : "Advarsel")}</span></td>
+                            <td className="text-slate-500">{r.note}</td>
+                          </tr>
+                        );
+                      })}
+                    </table>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-400">{d.checks.length === 0 ? "Ingen tjekliste for denne kategori." : "Ingen fil uploadet."}</p>
+                  )}
                 </div>
-                <p className="mt-1 text-xs text-slate-500">{f.doc}</p>
-                <p className="mt-2 text-sm text-slate-700">{f.detail}</p>
-                <div className="mt-2 rounded-md bg-slate-50 px-3 py-2">
-                  <p className="text-xs text-slate-600">
-                    <span className="font-semibold text-[#1c3f6e]">Henvisning:</span> {f.ref}
-                    {f.source === "procedure" && <span className="ml-1 text-slate-400">(Ved tvivl gælder PA Guidelines.)</span>}
-                  </p>
-                </div>
-              </div>
-            ))}
+              );
+            })}
+
+            {[...mangler, ...advarsler].length > 0 && (
+              <>
+                <h3 className="pt-1 text-sm font-semibold text-slate-800">Fund med henvisninger</h3>
+                {[...mangler, ...advarsler].map((f, i) => (
+                  <div key={f.id + i} className={"rounded-lg border border-slate-200 border-l-4 bg-white p-4 " + (f.sev === "mangler" ? "border-l-[#c0392b]" : "border-l-[#b26a00]")}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-slate-800">{f.rule}</span>
+                      <div className="flex shrink-0 flex-wrap items-center gap-2">
+                        {f.henlaeggelse && <Badge tone="henl">Henlæggelse ved manglende svar</Badge>}
+                        {f.fmBrev && <Badge tone="neutral">→ {f.fmBrev}</Badge>}
+                        <Badge tone={f.source === "guidelines" ? "outline" : "proc"}>{f.source === "guidelines" ? "Guidelines" : "Intern procedure"}</Badge>
+                        <Badge tone={f.sev === "mangler" ? "err" : "warn"}>{f.sev === "mangler" ? "Mangel" : "Advarsel"}</Badge>
+                      </div>
+                    </div>
+                    <p className="mt-1 text-xs text-slate-500">{f.doc}</p>
+                    <p className="mt-2 text-sm text-slate-700">{f.detail}</p>
+                    <div className="mt-2 rounded-md bg-slate-50 px-3 py-2">
+                      <p className="text-xs text-slate-600">
+                        <span className="font-semibold text-[#1c3f6e]">Henvisning:</span> {f.ref}
+                        {f.source === "procedure" && <span className="ml-1 text-slate-400">(Ved tvivl gælder PA Guidelines.)</span>}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
 
             <div className="rounded-lg border border-slate-200 border-l-4 border-l-slate-400 bg-white p-4">
               <div className="flex items-center justify-between gap-2">
@@ -431,7 +611,10 @@ function App() {
             <div className="flex items-center justify-between pb-2">
               <p className="text-xs text-slate-400">Screenet jf. PA Guidelines – Formalitetsbehandling og intern procedure FSP 3.2.2 (v40)</p>
               <div className="space-x-2">
-                <button className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50">Eksportér rapport (PDF)</button>
+                <button className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50"
+                  onClick={() => exportReport({ score, verdict: scoreVerdict(score), findings: [...mangler, ...advarsler], checks, gebyr, kravAntal, docFiles: docState })}>
+                  Eksportér rapport
+                </button>
                 <button className="rounded-md bg-[#1c3f6e] px-3 py-1.5 text-xs text-white hover:bg-[#122b4a]" onClick={() => setView("indlevering")}>Ret og screen igen</button>
               </div>
             </div>
@@ -444,6 +627,6 @@ function App() {
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
-<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4bc70e2c01a94c73b74392e4234840661791215815920" integrity="sha512-L0ha0OXavK/8okipN9F8BtP84dg9DUhPERbBXzwI6dgTA55d2+yweo3pn5CSFYs45/r8md2+xvUPtTdvTNRfjA==" nonce="kCAujf4gHg+/m9twm57EVw==" data-cf-beacon='{"version":"2024.11.0","token":"36b4216ae2dc4d5488c249161e71fe1e","spa":2}' crossorigin="anonymous"></script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4bc70e2c01a94c73b74392e4234840661791215815920" integrity="sha512-L0ha0OXavK/8okipN9F8BtP84dg9DUhPERbBXzwI6dgTA55d2+yweo3pn5CSFYs45/r8md2+xvUPtTdvTNRfjA==" nonce="xk4fK4kumRF0rrHYBK+SHA==" data-cf-beacon='{"version":"2024.11.0","token":"36b4216ae2dc4d5488c249161e71fe1e","spa":2}' crossorigin="anonymous"></script>
 </body>
 </html>
