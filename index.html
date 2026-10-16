@@ -87,8 +87,22 @@ const RULES = {
   p8: { sev: "advarsel", doc: "Ansøgningsblanket", rule: "Prioritetsoplysninger mangler eller er ugyldige", detail: "Prioritetsdatoen må maks. være 12 mdr. gammel ved indlevering; prioritetsdokumentet skal modtages inden 16 mdr.", fix: "Indsend prioritetsdokument (evt. via DAS-kode) rettidigt, eller send brev om bortfald af prioritet.", source: "procedure", ref: "FSP 3.2.2 pkt. 11.2 og 11.2.4", henlaeggelse: false, fmBrev: "FM Brev 4" },
 };
 
-/* ============================== PDF-tekstudtrækning + hash ============================== */
-async function extractPdf(file) {
+/* ============================== PDF-tekstudtrækning + hash + OCR-fallback ============================== */
+const TESSERACT_URL = "https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js";
+let tesseractPromise = null;
+function loadTesseract() {
+  if (window.Tesseract) return Promise.resolve();
+  if (!tesseractPromise) tesseractPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = TESSERACT_URL;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("Tesseract.js kunne ikke indlæses."));
+    document.head.appendChild(s);
+  });
+  return tesseractPromise;
+}
+
+async function extractPdf(file, onProgress) {
   const buf = await file.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", buf);
   const hash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
@@ -99,7 +113,35 @@ async function extractPdf(file) {
     const content = await page.getTextContent();
     text += content.items.map(it => it.str).join(" ") + "\n";
   }
-  return { hash, text: text.replace(/\s+/g, " ").trim(), pages: pdf.numPages };
+  text = text.replace(/\s+/g, " ").trim();
+  let ocr = false;
+  if (text.length < 40 && pdf.numPages > 0) {
+    /* Intet tekstlag (scannet PDF) — kør OCR som fallback */
+    try {
+      await loadTesseract();
+      const worker = await Tesseract.createWorker("dan+eng", 1);
+      const maxPages = Math.min(pdf.numPages, 20);
+      let ocrText = "";
+      for (let i = 1; i <= maxPages; i++) {
+        if (onProgress) onProgress("OCR — side " + i + " af " + maxPages);
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 2 });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+        const { data } = await worker.recognize(canvas);
+        ocrText += (data.text || "") + "\n";
+      }
+      await worker.terminate();
+      const cleaned = ocrText.replace(/\s+/g, " ").trim();
+      if (cleaned.length > text.length) { text = cleaned; ocr = true; }
+    } catch (e) {
+      /* OCR utilgængelig — fortsæt med det udtrukne tekstlag */
+    }
+  }
+  if (onProgress) onProgress(null);
+  return { hash, text, pages: pdf.numPages, ocr };
 }
 
 /* ============================== Relevansport ============================== */
@@ -127,7 +169,7 @@ function runChecks(docId, text, ctx) {
 
   if (!gate.relevant) {
     const relRule = RULES["rel_" + docId];
-    if (relRule) add("relevans", "rel_" + docId, false, "Kun " + gate.hits + " af " + gate.total + " relevanssignaler fundet.");
+    if (relRule) add("relevans", "rel_" + docId, false, !text ? "Ingen tekst kunne udtrækkes — PDF'en er scannet uden tekstlag, og OCR fandt intet. " + gate.hits + " af " + gate.total + " relevanssignaler fundet." : "Kun " + gate.hits + " af " + gate.total + " relevanssignaler fundet.");
     const docDef = DOCS.find(d => d.id === docId);
     if (docDef) for (const ck of docDef.checks) {
       if (ck.id === "relevans") continue;
@@ -283,16 +325,16 @@ function App() {
   async function handleFile(docId, file) {
     if (!file) return;
     setDupMsg(null);
-    setDoc(docId, { file: { name: file.name, size: file.size }, reading: true });
+    setDoc(docId, { file: { name: file.name, size: file.size }, reading: true, ocr: false, ocrStatus: null });
     try {
-      const { hash, text, pages } = await extractPdf(file);
+      const { hash, text, pages, ocr } = await extractPdf(file, msg => setDoc(docId, { ocrStatus: msg }));
       const other = Object.entries(docState).find(([id, st]) => id !== docId && st && st.hash === hash);
       if (other) {
         setDupMsg("Filen '" + file.name + "' er identisk med filen under '" + DOCS.find(d => d.id === other[0]).label + "'. Samme dokument må ikke uploades i flere kategorier.");
         setDoc(docId, { reading: false, dup: true });
         return;
       }
-      setDoc(docId, { reading: false, hash, text, pages, dup: false });
+      setDoc(docId, { reading: false, hash, text, pages, dup: false, ocr, ocrStatus: null });
     } catch {
       setDoc(docId, { reading: false, hash: null, text: "", pages: 0, dup: false });
     }
@@ -359,7 +401,7 @@ function App() {
     const badge = !hasFile
       ? (doc.req ? <Badge tone="req">Påkrævet</Badge> : <Badge tone="optional">Valgfri</Badge>)
       : st.dup ? <Badge tone="err">Duplikat</Badge>
-      : st.reading ? <Badge tone="neutral">Læser …</Badge>
+      : st.reading ? <Badge tone="neutral">{st.ocrStatus ? "OCR kører …" : "Læser …"}</Badge>
       : fails.length === 0 ? <Badge tone="ok">I orden</Badge>
       : <Badge tone="warn">{fails.length} fund</Badge>;
 
@@ -373,7 +415,7 @@ function App() {
             <p className="mt-1 text-xs text-slate-500">{doc.desc}</p>
             {hasFile && (
               <p className="mt-2 text-xs text-slate-500">
-                {st.file.name} · {fmtSize(st.file.size)}{st.pages ? " · " + st.pages + " sider" : ""}{st.reading ? " · læser …" : (st.text ? " · " + st.text.split(/\s+/).length + " ord" : " · intet tekstlag")}
+                {st.file.name} · {fmtSize(st.file.size)}{st.pages ? " · " + st.pages + " sider" : ""}{st.reading ? (st.ocrStatus ? " · " + st.ocrStatus : " · læser …") : (st.text ? " · " + st.text.split(/\s+/).length + " ord" : " · intet tekstlag")}{!st.reading && st.ocr ? " · tekst via OCR" : ""}
               </p>
             )}
             {hasFile && !st.reading && !st.dup && doc.checks.length > 0 && (
@@ -405,7 +447,7 @@ function App() {
             </label>
             {hasFile && (
               <button className="w-full rounded-md border border-slate-300 bg-white px-2 py-1 text-xs hover:bg-slate-50"
-                onClick={() => setDoc(doc.id, { file: undefined, text: undefined, hash: undefined, pages: 0, dup: false })}>
+                onClick={() => setDoc(doc.id, { file: undefined, text: undefined, hash: undefined, pages: 0, dup: false, ocr: false, ocrStatus: null })}>
                 Fjern fil
               </button>
             )}
