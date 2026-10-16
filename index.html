@@ -128,6 +128,11 @@ function runChecks(docId, text, ctx) {
   if (!gate.relevant) {
     const relRule = RULES["rel_" + docId];
     if (relRule) add("relevans", "rel_" + docId, false, "Kun " + gate.hits + " af " + gate.total + " relevanssignaler fundet.");
+    const docDef = DOCS.find(d => d.id === docId);
+    if (docDef) for (const ck of docDef.checks) {
+      if (ck.id === "relevans") continue;
+      add(ck.id, null, false, "Ikke vurderet — dokumentet bestod ikke relevansporten.");
+    }
     return { results, gate };
   }
   add("relevans", null, true, gate.hits + " af " + gate.total + " relevanssignaler fundet.");
@@ -174,6 +179,21 @@ function runChecks(docId, text, ctx) {
   return { results, gate };
 }
 
+/* ============================== Auto-detektering af ansøgningsdata ============================== */
+function detectSprog(text) {
+  const t = " " + (text || "").toLowerCase() + " ";
+  const c = re => (t.match(re) || []).length;
+  const scores = {
+    dansk: c(/\b(og|den|det|hvori|kendetegnende|opfindelsen|hvorledes|eller|vedrørende)\b/g),
+    engelsk: c(/\b(the|of|wherein|characterized|characterised|invention|according|and)\b/g),
+    tysk: c(/\b(der|die|das|und|wobei|gekennzeichnet|erfindung|anspruch)\b/g),
+    fransk: c(/\b(l'invention|caractéris|la présente|revendication|dans laquelle)\b/g),
+  };
+  let best = "ukendt", bs = 0;
+  for (const k of Object.keys(scores)) if (scores[k] > bs) { bs = scores[k]; best = k; }
+  return best;
+}
+
 /* ============================== Score ============================== */
 function computeScore(mangler, advarsler) {
   return Math.max(1, Math.min(10, 10 - mangler * 2 - advarsler));
@@ -186,12 +206,13 @@ function scoreVerdict(score) {
 }
 
 /* ============================== PDF-eksport af rapporten ============================== */
-function exportReport({ score, verdict, findings, checks, gebyr, kravAntal, docFiles }) {
+function exportReport({ score, verdict, findings, checks, gebyr, kravAntal, docFiles, ansogData }) {
   const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   let body = "";
   body += "<h1>PatentScreen — screeningsrapport</h1>";
   body += "<p>Dato: " + new Date().toLocaleDateString("da-DK") + " · Score: " + score + "/10 — " + esc(verdict) + "</p>";
   body += "<p>Screenet jf. PA Guidelines – Formalitetsbehandling og intern procedure FSP 3.2.2 (v40).</p>";
+  if (ansogData) body += "<h2>Ansøgningsdata</h2><p>" + esc(ansogData) + "</p>";
 
   body += "<h2>Detaljeret gennemgang pr. bilag</h2>";
   for (const d of DOCS) {
@@ -251,11 +272,6 @@ function App() {
   const [view, setView] = useState("indlevering");
   const [docState, setDocState] = useState({});
   const [dupMsg, setDupMsg] = useState(null);
-  const [sprog, setSprog] = useState("dansk");
-  const [fuldmaektig, setFuldmaektig] = useState("ansoger");
-  const [sekvenser, setSekvenser] = useState("nej");
-  const [antalKrav, setAntalKrav] = useState("1");
-  const [harPrioritet, setHarPrioritet] = useState("nej");
   const [rapportEnabled, setRapportEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -291,9 +307,17 @@ function App() {
   }
 
   /* --- Screening: relevansport + tjeklister pr. kategori --- */
-  const ctx = { fuldmaektig, harPrioritet: harPrioritet === "ja", hasTegninger: !!docState.tegninger?.file, claimsInDoc: 0, figRefs: 0 };
+  const allText = DOCS.map(d => docState[d.id]?.text || "").join(" ");
+  const blanketText = docState.blanket?.text || "";
+  const detSprog = detectSprog(allText);
+  const detFuldmaektig = /(ip[- ]rådgiver|autoriseret patent|rådgiver i patenter)/i.test(blanketText) ? "ip" : /(fuldm[æa]gtig|repræsentant|representative|agent|advokat)/i.test(blanketText) ? "annen" : "ansoger";
+  const detPrioritet = /(prioritet|priority|prioritetsdato)/i.test(blanketText);
+  const detSekvenser = /(sekvensliste|sequence listing|sekvens-id|seq\s*id|st\.?\s*26)/i.test(allText);
+  const ctx = { fuldmaektig: detFuldmaektig, harPrioritet: detPrioritet, hasTegninger: !!docState.tegninger?.file, claimsInDoc: 0, figRefs: 0 };
   const checks = {};
   const findings = [];
+  const seenIds = new Set();
+  const pushFinding = f => { const key = f.rule || f.id; if (!seenIds.has(key)) { seenIds.add(key); findings.push(f); } };
   for (const d of DOCS) {
     const st = docState[d.id];
     if (d.req && !st?.file) {
@@ -305,7 +329,7 @@ function App() {
       const { results } = runChecks(d.id, st.text, ctx);
       checks[d.id] = results;
       for (const r of results) {
-        if (!r.ok && r.ruleId) findings.push(RULES[r.ruleId]);
+        if (!r.ok && r.ruleId) pushFinding(RULES[r.ruleId]);
       }
       const allOk = results.every(r => r.ok);
       if (allOk && d.checks.length > 0) findings.push({ id: "ok-" + d.id, sev: "ok", doc: d.label, rule: d.label + " — alle tjek bestået", detail: "Alle " + d.checks.length + " elementer i tjeklisten er kontrolleret og godkendt.", fix: "", source: "guidelines", ref: "PA Guidelines · Formalitetsbehandling" });
@@ -313,10 +337,10 @@ function App() {
       findings.push(RULES.dup);
     }
   }
-  if (["fransk", "tysk", "andet"].includes(sprog)) findings.push(RULES.p3);
-  if (fuldmaektig === "annen") findings.push(RULES.g6);
-  if (sekvenser === "ja") findings.push(RULES.p7);
-  const kravAntal = Math.max(ctx.claimsInDoc || 0, parseInt(antalKrav || "0", 10));
+  if (detSprog === "tysk" || detSprog === "fransk") pushFinding(RULES.p3);
+  if (detFuldmaektig === "annen") pushFinding(RULES.g6);
+  if (detSekvenser) pushFinding(RULES.p7);
+  const kravAntal = ctx.claimsInDoc || 0;
   const gebyr = 3000 + Math.max(0, kravAntal - 10) * 300;
 
   const mangler = findings.filter(f => f.sev === "mangler");
@@ -325,8 +349,6 @@ function App() {
   const henlMangler = mangler.filter(f => f.henlaeggelse);
   const score = computeScore(mangler.length, advarsler.length);
 
-  const inputCls = "h-8 w-full rounded border border-slate-300 bg-white px-2 text-xs";
-  const labelCls = "text-xs font-medium text-slate-600";
 
   function DocCard({ doc }) {
     const st = docState[doc.id] || {};
@@ -434,45 +456,6 @@ function App() {
               {DOCS.map(d => <DocCard key={d.id} doc={d} />)}
             </div>
 
-            <div className="rounded-lg border border-slate-200 bg-white p-4">
-              <h3 className="text-sm font-semibold text-[#1c3f6e]">Ansøgningsdata (indgår i screeningen)</h3>
-              <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
-                <div className="space-y-1">
-                  <label className={labelCls}>Sprog</label>
-                  <select className={inputCls} value={sprog} onChange={e => { setSprog(e.target.value); setRapportEnabled(false); }}>
-                    <option value="dansk">Dansk</option><option value="engelsk">Engelsk</option>
-                    <option value="norsk">Norsk</option><option value="svensk">Svensk</option>
-                    <option value="fransk">Fransk</option><option value="tysk">Tysk</option><option value="andet">Andet</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className={labelCls}>Indgives via</label>
-                  <select className={inputCls} value={fuldmaektig} onChange={e => { setFuldmaektig(e.target.value); setRapportEnabled(false); }}>
-                    <option value="ansoger">Ansøger selv</option>
-                    <option value="ip">IP-rådgiver (fuldmagt kræves ikke)</option>
-                    <option value="annen">Anden repræsentant (fuldmagt kræves)</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className={labelCls}>Sekvenser påberåbt</label>
-                  <select className={inputCls} value={sekvenser} onChange={e => { setSekvenser(e.target.value); setRapportEnabled(false); }}>
-                    <option value="nej">Nej</option><option value="ja">Ja — sekvensliste kræves (XML jf. ST.26)</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className={labelCls}>Prioritet påberåbt</label>
-                  <select className={inputCls} value={harPrioritet} onChange={e => { setHarPrioritet(e.target.value); setRapportEnabled(false); }}>
-                    <option value="nej">Nej</option><option value="ja">Ja</option>
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className={labelCls}>Antal patentkrav (til gebyropgørelse)</label>
-                  <input type="number" min={1} className={inputCls} value={antalKrav}
-                    onChange={e => { setAntalKrav(e.target.value); setRapportEnabled(false); }} />
-                </div>
-              </div>
-            </div>
-
             <div className="flex items-center justify-end gap-4 rounded-lg border border-slate-200 bg-white p-4">
               <p className="mr-auto text-xs text-slate-500">Duplikatkontrol, relevansport og tjeklister kører ved upload. Ved tvivl gælder guidelines.</p>
               <button className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm hover:bg-slate-50">Gem kladde</button>
@@ -492,7 +475,7 @@ function App() {
                 <div className="flex-1">
                   <h2 className="text-xl font-semibold">{scoreVerdict(score)}</h2>
                   <p className="mt-1 text-sm text-white/80">
-                    {mangler.length} formel{mangler.length === 1 ? "" : "e"} mangel{mangler.length === 1 ? "" : "er"} og {advarsler.length} advarsle{advarsler.length === 1 ? "" : "r"} fundet.
+                    {mangler.length === 1 ? "1 formel mangel" : mangler.length + " formelle mangler"} og {advarsler.length === 1 ? "1 advarsel" : advarsler.length + " advarsler"} fundet.
                     {henlMangler.length > 0 ? " " + henlMangler.length + " af manglerne medfører henlæggelse ved manglende svar (pkt. 9.1)." : ""}
                     {" "}Ved tvivl gælder guidelines.
                   </p>
@@ -502,6 +485,17 @@ function App() {
                     <span className="rounded-full bg-[#1a7f4b] px-3 py-1">{okFinds.length} godkendt</span>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <h3 className="text-sm font-semibold text-[#1c3f6e]">Ansøgningsdata — udtrukket af screeningen</h3>
+              <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-slate-600 md:grid-cols-2">
+                <p><span className="font-semibold text-slate-700">Sprog:</span> {detSprog}</p>
+                <p><span className="font-semibold text-slate-700">Indgives via:</span> {detFuldmaektig === "ip" ? "IP-rådgiver" : detFuldmaektig === "annen" ? "Anden repræsentant (fuldmagt kræves)" : "Ansøger selv"}</p>
+                <p><span className="font-semibold text-slate-700">Prioritet påberåbt:</span> {detPrioritet ? "Ja" : "Nej"}</p>
+                <p><span className="font-semibold text-slate-700">Sekvenser:</span> {detSekvenser ? "Ja — XML jf. ST.26 kræves" : "Nej"}</p>
+                <p><span className="font-semibold text-slate-700">Antal patentkrav:</span> {kravAntal}</p>
               </div>
             </div>
 
@@ -548,11 +542,11 @@ function App() {
                       <tr className="text-slate-400"><td className="py-1">Tjek</td><td>Status</td><td>Bemærkning</td></tr>
                       {rows.map((r, i) => {
                         const label = labelOf(d, r.checkId);
-                        const sev = r.ok ? "ok" : (RULES[r.ruleId] ? RULES[r.ruleId].sev : "advarsel");
+                        const sev = r.ok ? "ok" : (RULES[r.ruleId] ? RULES[r.ruleId].sev : (r.note.indexOf("Ikke vurderet") === 0 ? "uvidst" : "advarsel"));
                         return (
                           <tr key={i} className="border-t border-slate-100">
                             <td className="py-1 pr-2 text-slate-700">{label}</td>
-                            <td className="pr-2"><span className={r.ok ? "text-[#1a7f4b]" : sev === "mangler" ? "text-[#c0392b] font-semibold" : "text-[#b26a00] font-semibold"}>{r.ok ? "OK" : (sev === "mangler" ? "Mangel" : "Advarsel")}</span></td>
+                            <td className="pr-2"><span className={r.ok ? "text-[#1a7f4b]" : sev === "mangler" ? "text-[#c0392b] font-semibold" : sev === "uvidst" ? "text-slate-400" : "text-[#b26a00] font-semibold"}>{r.ok ? "OK" : (sev === "mangler" ? "Mangel" : sev === "uvidst" ? "Ikke vurderet" : "Advarsel")}</span></td>
                             <td className="text-slate-500">{r.note}</td>
                           </tr>
                         );
@@ -612,7 +606,7 @@ function App() {
               <p className="text-xs text-slate-400">Screenet jf. PA Guidelines – Formalitetsbehandling og intern procedure FSP 3.2.2 (v40)</p>
               <div className="space-x-2">
                 <button className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs hover:bg-slate-50"
-                  onClick={() => exportReport({ score, verdict: scoreVerdict(score), findings: [...mangler, ...advarsler], checks, gebyr, kravAntal, docFiles: docState })}>
+                  onClick={() => exportReport({ score, verdict: scoreVerdict(score), findings: [...mangler, ...advarsler], checks, gebyr, kravAntal, docFiles: docState, ansogData: "Sprog: " + detSprog + " · Indgives via: " + (detFuldmaektig === "ip" ? "IP-rådgiver" : detFuldmaektig === "annen" ? "Anden repræsentant" : "Ansøger selv") + " · Prioritet: " + (detPrioritet ? "Ja" : "Nej") + " · Sekvenser: " + (detSekvenser ? "Ja" : "Nej") + " · Antal krav: " + kravAntal })}>
                   Eksportér rapport
                 </button>
                 <button className="rounded-md bg-[#1c3f6e] px-3 py-1.5 text-xs text-white hover:bg-[#122b4a]" onClick={() => setView("indlevering")}>Ret og screen igen</button>
